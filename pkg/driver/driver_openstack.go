@@ -145,8 +145,38 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 	var podNetworkIds = make(map[string]struct{})
 
 	if len(networkID) > 0 {
-		serverNetworks = append(serverNetworks, servers.Network{UUID: networkID})
+		// network port dealing if subnetID is specified
+		if subnetID != nil && len(*subnetID) > 0 {
+			// create port in given subnet
+			_, err := subnets.Get(nwClient, *subnetID).Extract()
+			if err != nil {
+				metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+				return "", "", fmt.Errorf("failed to get subnet information for subnetID %s: %s", *subnetID, err)
+			}
+
+			port, err := ports.Create(nwClient, &ports.CreateOpts{
+				Name:      d.MachineName,
+				NetworkID: networkID,
+				FixedIPs: &ports.IP{
+					SubnetID: *subnetID,
+				},
+				AllowedAddressPairs: []ports.AddressPair{{IPAddress: podNetworkCidr}},
+			}).Extract()
+			if err != nil {
+				metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+				return "", "", fmt.Errorf("failed to create port in subnet with subnetID %s: %s", *subnetID, err)
+			}
+
+			err = waitForStatus(client, port.ID, []string{"BUILD"}, []string{"ACTIVE"}, 600)
+			if err != nil {
+				return "", "", d.deleteOnFail(fmt.Errorf("error waiting for the %q port status: %s", port, err)) //TODO
+			}
+			serverNetworks = append(serverNetworks, servers.Network{UUID: networkID, Port: port.ID})
+		} else {
+			serverNetworks = append(serverNetworks, servers.Network{UUID: networkID})
+		}
 		podNetworkIds[networkID] = struct{}{}
+
 	} else {
 		for _, network := range specNetworks {
 			var resolvedNetworkID string
@@ -164,33 +194,6 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 				podNetworkIds[resolvedNetworkID] = struct{}{}
 			}
 		}
-	}
-
-	// network port dealing if subnetID is specified
-	if subnetID != nil && len(*subnetID) > 0 {
-		// create port in given subnet
-		_, err := subnets.Get(nwClient, *subnetID).Extract()
-		if err != nil {
-			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
-			return "", "", fmt.Errorf("failed to get subnet information for subnetID %s: %s", *subnetID, err)
-		}
-
-		port, err := ports.Create(nwClient, &ports.CreateOpts{
-			NetworkID: networkID,
-			FixedIPs: &ports.IP{
-				SubnetID: *subnetID,
-			},
-		}).Extract()
-		if err != nil {
-			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
-			return "", "", fmt.Errorf("failed to create port in subnet with subnetID %s: %s", *subnetID, err)
-		}
-
-		err = waitForStatus(client, port.ID, []string{"BUILD"}, []string{"ACTIVE"}, 600)
-		if err != nil {
-			return "", "", d.deleteOnFail(fmt.Errorf("error waiting for the %q server status: %s", server.ID, err))
-		}
-		serverNetworks
 	}
 
 	metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
@@ -313,21 +316,52 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 		return err
 	}
 
-	result := servers.Delete(client, instanceID)
-	if result.Err == nil {
-		// waiting for the machine to be deleted to release consumed quota resources, 5 minutes should be enough
-		err = waitForStatus(client, machineID, nil, []string{"DELETED", "SOFT_DELETED"}, 300)
-		if err != nil {
-			return fmt.Errorf("error waiting for the %q server to be deleted: %s", machineID, err)
-		}
-		metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
-		klog.V(3).Infof("Deleted machine with ID: %s", machineID)
-	} else {
+	err = servers.Delete(client, instanceID).ExtractErr()
+	if err != nil { // TODO parse error
 		metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
 		klog.Errorf("Failed to delete machine with ID: %s", machineID)
+
+		return err
 	}
 
-	return result.Err
+	// waiting for the machine to be deleted to release consumed quota resources, 5 minutes should be enough
+	err = waitForStatus(client, machineID, nil, []string{"DELETED", "SOFT_DELETED"}, 300)
+	if err != nil {
+		return fmt.Errorf("error waiting for the %q server to be deleted: %s", machineID, err)
+	}
+	metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
+	klog.V(3).Infof("Deleted machine with ID: %s", machineID)
+
+	// delete dedicated port, if subnet is specified for shoot
+	if d.OpenStackMachineClass.Spec.SubnetID != nil && len(*d.OpenStackMachineClass.Spec.SubnetID) > 0 {
+		nwClient, err := d.createNeutronClient()
+		if err != nil {
+			return err
+		}
+
+		portID, err := ports.IDFromName(nwClient, d.MachineName)
+		if err != nil {
+			return err
+		}
+
+		err = ports.Delete(nwClient, portID).ExtractErr()
+		if err != nil { // TODO parse 404 type of error
+			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+			klog.Errorf("Failed to delete port with ID: %s", portID)
+
+			return err
+		}
+
+		err = waitForStatus(nwClient, portID, nil, []string{"DELETED", "SOFT_DELETED"}, 300)
+		if err != nil {
+			return fmt.Errorf("error waiting for the %q port to be deleted: %s", portID, err)
+		}
+		metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+		klog.V(3).Infof("Deleted port with ID: %s", portID)
+
+	}
+
+	return nil
 }
 
 // GetExisting method is used to get machineID for existing OS machine
