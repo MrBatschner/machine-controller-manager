@@ -28,6 +28,7 @@ import (
 	"github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
 	"github.com/gardener/machine-controller-manager/pkg/metrics"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog"
@@ -112,6 +113,7 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 	imageName := d.OpenStackMachineClass.Spec.ImageName
 	imageID := d.OpenStackMachineClass.Spec.ImageID
 	networkID := d.OpenStackMachineClass.Spec.NetworkID
+	subnetID := d.OpenStackMachineClass.Spec.SubnetID
 	specNetworks := d.OpenStackMachineClass.Spec.Networks
 	securityGroups := d.OpenStackMachineClass.Spec.SecurityGroups
 	availabilityZone := d.OpenStackMachineClass.Spec.AvailabilityZone
@@ -164,6 +166,33 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 		}
 	}
 
+	// network port dealing if subnetID is specified
+	if subnetID != nil && len(*subnetID) > 0 {
+		// create port in given subnet
+		_, err := subnets.Get(nwClient, *subnetID).Extract()
+		if err != nil {
+			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+			return "", "", fmt.Errorf("failed to get subnet information for subnetID %s: %s", *subnetID, err)
+		}
+
+		port, err := ports.Create(nwClient, &ports.CreateOpts{
+			NetworkID: networkID,
+			FixedIPs: &ports.IP{
+				SubnetID: *subnetID,
+			},
+		}).Extract()
+		if err != nil {
+			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+			return "", "", fmt.Errorf("failed to create port in subnet with subnetID %s: %s", *subnetID, err)
+		}
+
+		err = waitForStatus(client, port.ID, []string{"BUILD"}, []string{"ACTIVE"}, 600)
+		if err != nil {
+			return "", "", d.deleteOnFail(fmt.Errorf("error waiting for the %q server status: %s", server.ID, err))
+		}
+		serverNetworks
+	}
+
 	metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
 
 	createOpts = &servers.CreateOpts{
@@ -193,7 +222,6 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 			SchedulerHints:    hints,
 		}
 	}
-
 
 	if rootDiskSize > 0 {
 		blockDevices, err := resourceInstanceBlockDevicesV2(rootDiskSize, imageRef)
