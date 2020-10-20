@@ -317,7 +317,7 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 	}
 
 	err = servers.Delete(client, instanceID).ExtractErr()
-	if err != nil { // TODO parse error
+	if err != nil && isNotFoundError(err) == false {
 		metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
 		klog.Errorf("Failed to delete machine with ID: %s", machineID)
 
@@ -345,7 +345,8 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 		}
 
 		err = ports.Delete(nwClient, portID).ExtractErr()
-		if err != nil { // TODO parse 404 type of error
+		if err != nil && isNotFoundError(err) == false {
+
 			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
 			klog.Errorf("Failed to delete port with ID: %s", portID)
 
@@ -635,6 +636,20 @@ func (d *OpenStackDriver) GetUserData() string {
 //SetUserData set the used data whit which the VM will be booted
 func (d *OpenStackDriver) SetUserData(userData string) {
 	d.UserData = userData
+}
+
+// isNotFoundError checks, if an error returned by gophercloud is 404 like
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(gophercloud.ErrDefault404); ok {
+		return true
+	}
+	if _, ok := err.(gophercloud.Err404er); ok {
+		return true
+	}
+	return false
 }
 
 func waitForStatus(c *gophercloud.ServiceClient, id string, pending []string, target []string, secs int) error {
