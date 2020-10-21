@@ -146,6 +146,9 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 
 	if len(networkID) > 0 {
 		// network port dealing if subnetID is specified
+
+		klog.V(3).Infof("existing network %s specified, need to pre-allocate ports ", networkID)
+
 		if subnetID != nil && len(*subnetID) > 0 {
 			// create port in given subnet
 			_, err := subnets.Get(nwClient, *subnetID).Extract()
@@ -154,12 +157,12 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 				return "", "", fmt.Errorf("failed to get subnet information for subnetID %s: %s", *subnetID, err)
 			}
 
+			klog.V(3).Infof("creating port in subnet %s", *subnetID)
+
 			port, err := ports.Create(nwClient, &ports.CreateOpts{
-				Name:      d.MachineName,
-				NetworkID: networkID,
-				FixedIPs: &ports.IP{
-					SubnetID: *subnetID,
-				},
+				Name:                d.MachineName,
+				NetworkID:           networkID,
+				FixedIPs:            []ports.IP{ports.IP{SubnetID: *subnetID}},
 				AllowedAddressPairs: []ports.AddressPair{{IPAddress: podNetworkCidr}},
 			}).Extract()
 			if err != nil {
@@ -167,10 +170,8 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 				return "", "", fmt.Errorf("failed to create port in subnet with subnetID %s: %s", *subnetID, err)
 			}
 
-			err = waitForStatus(client, port.ID, []string{"BUILD"}, []string{"ACTIVE"}, 600)
-			if err != nil {
-				return "", "", d.deleteOnFail(fmt.Errorf("error waiting for the %q port status: %s", port, err)) //TODO
-			}
+			klog.V(3).Infof("port with ID %s successfully created", port.ID)
+
 			serverNetworks = append(serverNetworks, servers.Network{UUID: networkID, Port: port.ID})
 		} else {
 			serverNetworks = append(serverNetworks, servers.Network{UUID: networkID})
@@ -341,8 +342,16 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 
 		portID, err := ports.IDFromName(nwClient, d.MachineName)
 		if err != nil {
-			return err
+			if isNotFoundError(err) {
+				klog.V(3).Infof("port with name %s was not found", d.MachineName)
+				return nil
+			} else {
+				fmt.Errorf("%s", err)
+				return err
+			}
 		}
+
+		klog.V(3).Infof("removing port with ID %s", portID)
 
 		err = ports.Delete(nwClient, portID).ExtractErr()
 		if err != nil && isNotFoundError(err) == false {
@@ -353,13 +362,8 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 			return err
 		}
 
-		err = waitForStatus(nwClient, portID, nil, []string{"DELETED", "SOFT_DELETED"}, 300)
-		if err != nil {
-			return fmt.Errorf("error waiting for the %q port to be deleted: %s", portID, err)
-		}
 		metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
 		klog.V(3).Infof("Deleted port with ID: %s", portID)
-
 	}
 
 	return nil
