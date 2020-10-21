@@ -345,13 +345,12 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 			if isNotFoundError(err) {
 				klog.V(3).Infof("port with name %s was not found", d.MachineName)
 				return nil
-			} else {
-				fmt.Errorf("%s", err)
-				return err
 			}
+
+			return fmt.Errorf("error deleting port with name %s: %s", d.MachineName, err)
 		}
 
-		klog.V(3).Infof("removing port with ID %s", portID)
+		klog.V(3).Infof("deleting port with ID %s", portID)
 
 		err = ports.Delete(nwClient, portID).ExtractErr()
 		if err != nil && isNotFoundError(err) == false {
@@ -651,6 +650,9 @@ func isNotFoundError(err error) bool {
 		return true
 	}
 	if _, ok := err.(gophercloud.Err404er); ok {
+		return true
+	}
+	if _, ok := err.(gophercloud.ErrResourceNotFound); ok {
 		return true
 	}
 	return false
