@@ -27,6 +27,7 @@ import (
 
 	"github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
 	"github.com/gardener/machine-controller-manager/pkg/metrics"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
 	"github.com/prometheus/client_golang/prometheus"
@@ -159,11 +160,22 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 
 			klog.V(3).Infof("creating port in subnet %s", *subnetID)
 
+			var securityGroupIDs []string
+			for _, securityGroup := range securityGroups {
+				securityGroupID, err := groups.IDFromName(nwClient, securityGroup)
+				if err != nil {
+					metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+					return "", "", fmt.Errorf("failed to get ID for security group %s: ", securityGroup, err)
+				}
+				securityGroupIDs = append(securityGroupIDs, securityGroupID)
+			}
+
 			port, err := ports.Create(nwClient, &ports.CreateOpts{
 				Name:                d.MachineName,
 				NetworkID:           networkID,
 				FixedIPs:            []ports.IP{ports.IP{SubnetID: *subnetID}},
 				AllowedAddressPairs: []ports.AddressPair{{IPAddress: podNetworkCidr}},
+				SecurityGroups:      &securityGroupIDs,
 			}).Extract()
 			if err != nil {
 				metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
