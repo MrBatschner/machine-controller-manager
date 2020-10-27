@@ -165,7 +165,7 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 				securityGroupID, err := groups.IDFromName(nwClient, securityGroup)
 				if err != nil {
 					metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
-					return "", "", fmt.Errorf("failed to get ID for security group %s: ", securityGroup, err)
+					return "", "", fmt.Errorf("failed to get ID for security group %s: %s", securityGroup, err)
 				}
 				securityGroupIDs = append(securityGroupIDs, securityGroupID)
 			}
@@ -173,7 +173,7 @@ func (d *OpenStackDriver) Create() (string, string, error) {
 			port, err := ports.Create(nwClient, &ports.CreateOpts{
 				Name:                d.MachineName,
 				NetworkID:           networkID,
-				FixedIPs:            []ports.IP{ports.IP{SubnetID: *subnetID}},
+				FixedIPs:            []ports.IP{{SubnetID: *subnetID}},
 				AllowedAddressPairs: []ports.AddressPair{{IPAddress: podNetworkCidr}},
 				SecurityGroups:      &securityGroupIDs,
 			}).Extract()
