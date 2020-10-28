@@ -320,6 +320,11 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 	} else if len(res) == 0 {
 		// No running instance exists with the given machine-ID
 		klog.V(2).Infof("No VM matching the machine-ID found on the provider %q", machineID)
+		err = d.deletePort()
+		if err != nil {
+			return err
+		}
+
 		return nil
 	}
 
@@ -345,36 +350,9 @@ func (d *OpenStackDriver) Delete(machineID string) error {
 	metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "nova"}).Inc()
 	klog.V(3).Infof("Deleted machine with ID: %s", machineID)
 
-	// delete dedicated port, if subnet is specified for shoot
-	if d.OpenStackMachineClass.Spec.SubnetID != nil && len(*d.OpenStackMachineClass.Spec.SubnetID) > 0 {
-		nwClient, err := d.createNeutronClient()
-		if err != nil {
-			return err
-		}
-
-		portID, err := ports.IDFromName(nwClient, d.MachineName)
-		if err != nil {
-			if isNotFoundError(err) {
-				klog.V(3).Infof("port with name %s was not found", d.MachineName)
-				return nil
-			}
-
-			return fmt.Errorf("error deleting port with name %s: %s", d.MachineName, err)
-		}
-
-		klog.V(3).Infof("deleting port with ID %s", portID)
-
-		err = ports.Delete(nwClient, portID).ExtractErr()
-		if err != nil && isNotFoundError(err) == false {
-
-			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
-			klog.Errorf("Failed to delete port with ID: %s", portID)
-
-			return err
-		}
-
-		metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
-		klog.V(3).Infof("Deleted port with ID: %s", portID)
+	err = d.deletePort()
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -651,6 +629,42 @@ func (d *OpenStackDriver) GetUserData() string {
 //SetUserData set the used data whit which the VM will be booted
 func (d *OpenStackDriver) SetUserData(userData string) {
 	d.UserData = userData
+}
+
+// deletePort method is used to delete a dedicated port, if subnet is specified for machine
+func (d *OpenStackDriver) deletePort() error {
+
+	if d.OpenStackMachineClass.Spec.SubnetID != nil && len(*d.OpenStackMachineClass.Spec.SubnetID) > 0 {
+		nwClient, err := d.createNeutronClient()
+		if err != nil {
+			return err
+		}
+
+		portID, err := ports.IDFromName(nwClient, d.MachineName)
+		if err != nil {
+			if isNotFoundError(err) {
+				klog.V(3).Infof("port with name %s was not found", d.MachineName)
+				return nil
+			}
+
+			return fmt.Errorf("error deleting port with name %s: %s", d.MachineName, err)
+		}
+
+		klog.V(3).Infof("deleting port with ID %s", portID)
+
+		err = ports.Delete(nwClient, portID).ExtractErr()
+		if err != nil && isNotFoundError(err) == false {
+			metrics.APIFailedRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+			klog.Errorf("Failed to delete port with ID: %s", portID)
+
+			return err
+		}
+
+		metrics.APIRequestCount.With(prometheus.Labels{"provider": "openstack", "service": "neutron"}).Inc()
+		klog.V(3).Infof("Deleted port with ID: %s", portID)
+	}
+
+	return nil
 }
 
 // isNotFoundError checks, if an error returned by gophercloud is 404 like
